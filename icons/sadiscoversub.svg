@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 1280" width="1280" height="1280"
+     role="img" aria-label="sadiscoversub">
+  <title>sadiscoversub</title>
+
+  <!-- handle: from the lens rim down into the left node -->
+  <path d="M 540.49 583.59 L 376.0 866.0"
+        stroke="#52B748" stroke-width="81.5" stroke-linecap="round"/>
+  <circle cx="376.0" cy="866.0" r="100.0" fill="#52B748"/>
+
+  <!-- bar linking the two nodes (straight end seated at the left ring's inner radius) -->
+  <path d="M 517.5 866.0 L 905.0 866.0"
+        stroke="#4A4A4A" stroke-width="84.0" stroke-linecap="butt"/>
+
+  <!-- right node: one continuous ring, opening where the bar enters -->
+  <path d="M 769.40 735.06 A 188.5 188.5 0 1 1 769.40 996.94" fill="none"
+        stroke="#4A4A4A" stroke-width="89.0" stroke-linecap="butt"/>
+  <circle cx="905.0" cy="866.0" r="98.0" fill="#4A4A4A"/>
+
+  <!-- left node: opening centred on the handle -->
+  <path d="M 564.0 866.0 A 188.0 188.0 0 1 1 343.35 680.86" fill="none"
+        stroke="#4A4A4A" stroke-width="93.0" stroke-linecap="butt"/>
+
+  <!-- lens -->
+  <circle cx="641.0" cy="411.0" r="199.75" fill="none"
+          stroke="#52B748" stroke-width="81.5"/>
+  <path d="M 590.0 328.0 L 741.0 410.0 L 590.0 492.0 Z"
+        fill="#4A4A4A"/>
+</svg>

@@ -1,0 +1,14 @@
+{
+  "SaDiscoverSub": {
+    "name": "神医媒体订阅请求",
+    "description": "接收神医的媒体订阅请求并创建订阅。",
+    "labels": "订阅",
+    "version": "0.1.0",
+    "icon": "https://raw.githubusercontent.com/sjtuross/MoviePilot-Plugins/main/icons/sadiscoversub.png",
+    "author": "sjtuross",
+    "level": 1,
+    "history": {
+      "v0.1.0": "初始版本，支持接收神医的 library.subscribe 通知并创建订阅。"
+    }
+  }
+}
