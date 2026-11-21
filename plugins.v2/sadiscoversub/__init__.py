@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.chain.subscribe import SubscribeChain
 from app.core.event import Event, eventmanager
 from app.core.metainfo import MetaInfo
+from app.helper.mediaserver import MediaServerHelper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType
@@ -23,7 +24,7 @@ class SaDiscoverSub(_PluginBase):
     plugin_name = "神医媒体订阅请求"
     plugin_desc = "接收神医的媒体订阅请求并创建订阅。"
     plugin_icon = "https://raw.githubusercontent.com/sjtuross/MoviePilot-Plugins/main/icons/sadiscoversub.png"
-    plugin_version = "0.1.0"
+    plugin_version = "0.1.1"
     plugin_author = "sjtuross"
     author_url = "https://github.com/sjtuross"
     plugin_config_prefix = "sadiscoversub_"
@@ -47,6 +48,16 @@ class SaDiscoverSub(_PluginBase):
         self._message = bool(config.get("message", True))
         history = self.get_data("history")
         self._history = history if isinstance(history, list) else []
+        if self._enabled:
+            self._warn_if_no_media_server()
+
+    def _warn_if_no_media_server(self) -> None:
+        """提示未配置媒体服务器时内置 Webhook 不会分发事件。"""
+        try:
+            if not MediaServerHelper().get_services():
+                logger.warning("未配置或未启用媒体服务器")
+        except Exception as error:
+            logger.debug(f"检查媒体服务器配置失败：{error}")
 
     def get_state(self) -> bool:
         """返回插件是否已启用。"""
@@ -203,6 +214,7 @@ class SaDiscoverSub(_PluginBase):
         if not isinstance(item, dict):
             return
 
+        logger.info(f"收到 library.subscribe 事件：{item.get('Name') or item.get('Id') or '未知条目'}")
         self._handle_subscribe_request(raw, item)
 
     def _handle_subscribe_request(self, raw: Dict[str, Any], item: Dict[str, Any]) -> None:
