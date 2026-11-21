@@ -24,7 +24,7 @@ class SaDiscoverSub(_PluginBase):
     plugin_name = "神医媒体订阅请求"
     plugin_desc = "接收神医的媒体订阅请求并创建订阅。"
     plugin_icon = "https://raw.githubusercontent.com/sjtuross/MoviePilot-Plugins/main/icons/sadiscoversub.png"
-    plugin_version = "0.1.2"
+    plugin_version = "0.1.3"
     plugin_author = "sjtuross"
     author_url = "https://github.com/sjtuross"
     plugin_config_prefix = "sadiscoversub_"
@@ -103,7 +103,7 @@ class SaDiscoverSub(_PluginBase):
                                         "component": "VSwitch",
                                         "props": {
                                             "model": "message",
-                                            "label": "创建订阅后发送通知",
+                                            "label": "发送订阅处理通知",
                                             "color": "primary",
                                         },
                                     }
@@ -317,11 +317,11 @@ class SaDiscoverSub(_PluginBase):
                 mtype=detected_type,
                 season=season,
                 media_source=media_source,
-                media_id=media_id,
-                username=username,
-                message=self._message,
-                exist_ok=True,
-            )
+            media_id=media_id,
+            username=username,
+            message=False,
+            exist_ok=True,
+        )
         except Exception as error:
             logger.error(f"使用 {media_source.value}:{media_id} 创建订阅异常：{error}")
             return None, f"失败：{error}"
@@ -401,14 +401,33 @@ class SaDiscoverSub(_PluginBase):
                 username=username,
             )
 
-        status = "已创建" if subscribe_id else "未新增"
-        if result_message:
-            status = f"{status}：{result_message}"
+        if subscribe_id and "新增订阅成功" in result_message:
+            status = "已创建"
+        elif subscribe_id:
+            status = "已存在"
+        elif result_message:
+            status = f"未新增：{result_message}"
+        else:
+            status = "未新增"
         self._record_event(item, used_source, used_id, status, season)
         logger.info(
             f"library.subscribe {status}：{title}，{used_source.value}:{used_id}，"
             f"订阅 ID：{subscribe_id}"
         )
+
+        if self._message:
+            display = f"{title} ({year})" if year else title
+            if detected_type == MediaType.TV:
+                display = f"{display} S{season or 1:02d}"
+            notify_status = (
+                "已添加订阅" if status == "已创建"
+                else "订阅已存在" if status == "已存在"
+                else "未添加订阅"
+            )
+            text = f"{used_source.value}:{used_id}"
+            if result_message:
+                text = f"{text}\n{result_message}"
+            self.post_message(title=f"{display} {notify_status}", text=text)
 
     @staticmethod
     def _parse_season(title: str, item: Dict[str, Any]) -> Optional[int]:
