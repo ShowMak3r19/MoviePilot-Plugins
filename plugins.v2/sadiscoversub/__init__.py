@@ -31,6 +31,100 @@ _ACTION_LABELS = {
     "failed": "失败",
 }
 
+_SEASON_SUFFIX_PATTERN = re.compile(
+    r"(?i)(?:\s*第\s*[一二三四五六七八九十百\d]+\s*季|\s*\bS(?:eason)?\s*0*\d{1,2}\b)\s*$"
+)
+
+
+def _compact_title(text: Any) -> str:
+    """标题归一化比较用：去掉标点空白并统一小写。"""
+    if not text:
+        return ""
+    return "".join(ch for ch in str(text).casefold() if ch.isalnum())
+
+
+def _strip_season_suffix(title: Any, season: Optional[int] = None) -> str:
+    """去除标题尾部的季号后缀，提取用于一致性比对的基础片名。"""
+    text = str(title or "").strip()
+    if not text:
+        return ""
+    stripped = _SEASON_SUFFIX_PATTERN.sub("", text).strip()
+    if season and season >= 2:
+        tail_match = re.match(rf"^(.+?)\s*{season}$", stripped)
+        if tail_match and len(tail_match.group(1).strip()) >= 2:
+            stripped = tail_match.group(1).strip()
+    return stripped or text
+
+
+def _collect_media_titles(mediainfo: Any) -> set:
+    """收集 MediaInfo 上所有可用于片名核对的归一化标题与别名。"""
+    titles = set()
+    if not mediainfo:
+        return titles
+    for attr in ("title", "original_title", "en_title", "hk_title", "tw_title", "sg_title"):
+        val = _compact_title(getattr(mediainfo, attr, None))
+        if val:
+            titles.add(val)
+    for alias in getattr(mediainfo, "names", None) or []:
+        val = _compact_title(alias)
+        if val:
+            titles.add(val)
+    tmdb_info = getattr(mediainfo, "tmdb_info", None)
+    if isinstance(tmdb_info, dict):
+        for key in ("title", "name", "original_title", "original_name"):
+            val = _compact_title(tmdb_info.get(key))
+            if val:
+                titles.add(val)
+    return titles
+
+
+def _extract_year_int(year: Any) -> Optional[int]:
+    """提取四位年份整数，格式非法时返回 None。"""
+    text = str(year or "").strip()
+    if len(text) >= 4 and text[:4].isdigit():
+        return int(text[:4])
+    return None
+
+
+def _is_year_compatible(
+    mediainfo: Any,
+    expected_year: Any,
+    season: Optional[int] = None,
+) -> bool:
+    """校验候选媒体年份是否兼容（剧集第 2 季及以上跳过首播年校验，其余允许 ±1 年误差）。"""
+    if getattr(mediainfo, "type", None) == MediaType.TV and season and season >= 2:
+        return True
+    exp = _extract_year_int(expected_year)
+    got = _extract_year_int(getattr(mediainfo, "year", None))
+    if exp is None or got is None:
+        return True
+    return abs(got - exp) <= 1
+
+
+def _matches_expected_titles(mediainfo: Any, expected_titles: List[str]) -> bool:
+    """判断候选媒体标题/译名集合是否命中任意预期片名。"""
+    expected = {_compact_title(t) for t in expected_titles if _compact_title(t)}
+    if not expected:
+        return True
+    return bool(_collect_media_titles(mediainfo) & expected)
+
+
+def _is_candidate_consistent(
+    mediainfo: Any,
+    expected_titles: List[str],
+    expected_type: Optional[MediaType],
+    expected_year: Any,
+    season: Optional[int] = None,
+) -> bool:
+    """综合校验候选媒体的类型、年份与片名是否与请求一致。"""
+    if not mediainfo:
+        return False
+    if expected_type and getattr(mediainfo, "type", None) and mediainfo.type != expected_type:
+        return False
+    if not _is_year_compatible(mediainfo, expected_year, season=season):
+        return False
+    return _matches_expected_titles(mediainfo, expected_titles)
+
 
 class SaDiscoverSub(_PluginBase):
     """将神医 Emby 探索频道中的 library.subscribe 通知转换为下载或订阅。"""
@@ -519,6 +613,161 @@ class SaDiscoverSub(_PluginBase):
             logger.warning(f"识别媒体 {identity} 异常：{error}")
         return None
 
+    def _fetch_douban_info(self, douban_id: str) -> Dict[str, Any]:
+        """安全获取豆瓣条目详情。"""
+        try:
+            info = self.chain.douban_info(doubanid=douban_id) or {}
+            return info if isinstance(info, dict) else {}
+        except Exception as error:
+            logger.warning(f"获取豆瓣条目 {douban_id} 基础信息失败：{error}")
+            return {}
+
+    @staticmethod
+    def _build_localized_titles(
+        title: str,
+        meta: Any,
+        douban_info: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """整理用于一致性校验与中文片名纠偏的候选片名列表（保持优先级并去重）。"""
+        season = getattr(meta, "begin_season", None)
+        raw_candidates: List[str] = [
+            _strip_season_suffix(title, season),
+            str(title or "").strip(),
+            str(getattr(meta, "name", "") or "").strip(),
+        ]
+        if isinstance(douban_info, dict):
+            db_title = str(douban_info.get("title") or "").strip()
+            if db_title:
+                raw_candidates.extend([_strip_season_suffix(db_title, season), db_title])
+            for aka in douban_info.get("aka") or []:
+                aka_text = str(aka or "").strip()
+                if aka_text:
+                    raw_candidates.append(_strip_season_suffix(aka_text, season))
+
+        result: List[str] = []
+        seen = set()
+        for candidate in raw_candidates:
+            compacted = _compact_title(candidate)
+            if candidate and compacted and compacted not in seen:
+                seen.add(compacted)
+                result.append(candidate)
+        return result
+
+    def _disambiguate_converted_media(
+        self,
+        mediachain: MediaChain,
+        meta: Any,
+        title: str,
+        douban_id: str,
+        tmdb_id: Optional[int],
+        converted_tmdb_id: int,
+        converted_media: Any,
+        douban_info: Optional[Dict[str, Any]],
+    ) -> Tuple[Any, str]:
+        """
+        对豆瓣→TMDB 转换结果做片名一致性校验；若疑为同年份同名撞车，依次通过
+        Webhook 自带 TMDB ID 与中文片名重搜 TMDB 进行纠偏。
+        """
+        season = getattr(meta, "begin_season", None)
+        expected_type = getattr(meta, "type", None)
+        expected_year = getattr(meta, "year", None)
+        request_titles = self._build_localized_titles(title, meta)
+
+        if _is_candidate_consistent(
+            converted_media,
+            request_titles,
+            expected_type,
+            expected_year,
+            season=season,
+        ):
+            return converted_media, f"tmdb:{converted_tmdb_id}"
+
+        # 仅在初步校验不一致时才补拉豆瓣详情，避免正常命中时产生额外请求
+        if douban_info is None:
+            douban_info = self._fetch_douban_info(douban_id)
+        if douban_info and not expected_year and douban_info.get("year"):
+            expected_year = str(douban_info.get("year")).strip()
+            meta.year = expected_year
+        localized_titles = self._build_localized_titles(title, meta, douban_info)
+
+        if _is_candidate_consistent(
+            converted_media,
+            localized_titles,
+            expected_type,
+            expected_year,
+            season=season,
+        ):
+            return converted_media, f"tmdb:{converted_tmdb_id}"
+
+        logger.warning(
+            f"豆瓣 {douban_id} 转 TMDB {converted_tmdb_id}（{getattr(converted_media, 'title', '')}）"
+            f"与请求片名「{title}」不一致，尝试自动纠偏"
+        )
+
+        # 纠偏 1：校验 Webhook 自带的 TMDB ID
+        if tmdb_id and tmdb_id != converted_tmdb_id:
+            webhook_media = self._safe_recognize_media(meta=meta, tmdbid=tmdb_id)
+            if _is_candidate_consistent(
+                webhook_media,
+                localized_titles,
+                expected_type,
+                expected_year,
+                season=season,
+            ):
+                logger.info(
+                    f"片名纠偏命中 Webhook TMDB {tmdb_id}："
+                    f"{getattr(webhook_media, 'title_year', getattr(webhook_media, 'title', ''))}"
+                )
+                return webhook_media, f"tmdb:{tmdb_id}"
+
+        # 纠偏 2：改用中文/本地化片名直接匹配 TMDB（绕过英文原名按上映日期降序撞车）
+        original_compact = _compact_title(
+            douban_info.get("original_title") if isinstance(douban_info, dict) else None
+        )
+        tried_ids = {converted_tmdb_id}
+        if tmdb_id:
+            tried_ids.add(tmdb_id)
+        match_fn = getattr(mediachain, "match_tmdbinfo", None)
+        if callable(match_fn):
+            for search_title in localized_titles:
+                if original_compact and _compact_title(search_title) == original_compact:
+                    continue
+                try:
+                    matched = match_fn(
+                        name=search_title,
+                        year=expected_year,
+                        mtype=expected_type,
+                        season=season,
+                    )
+                except Exception as error:
+                    logger.debug(f"按片名「{search_title}」匹配 TMDB 异常：{error}")
+                    continue
+                if not isinstance(matched, dict) or not matched.get("id"):
+                    continue
+                try:
+                    alt_id = int(matched.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                if alt_id in tried_ids:
+                    continue
+                tried_ids.add(alt_id)
+                alt_media = self._safe_recognize_media(meta=meta, tmdbid=alt_id)
+                if _is_candidate_consistent(
+                    alt_media,
+                    localized_titles,
+                    expected_type,
+                    expected_year,
+                    season=season,
+                ):
+                    logger.info(
+                        f"片名纠偏命中 TMDB {alt_id}（关键词「{search_title}」）："
+                        f"{getattr(alt_media, 'title_year', getattr(alt_media, 'title', ''))}"
+                    )
+                    return alt_media, f"tmdb:{alt_id}"
+
+        # 若未找到更优中文命中（例如冷门外片在 TMDB 暂无中文译名），在类型与年份兼容前提下保留原结果
+        return converted_media, f"tmdb:{converted_tmdb_id}"
+
     def _recognize_request_media(
         self,
         meta: Any,
@@ -528,18 +777,16 @@ class SaDiscoverSub(_PluginBase):
     ) -> Tuple[Any, Optional[str]]:
         """
         参考豆瓣想看执行媒体识别：
-        - 识别源为 TMDB 时：优先豆瓣 ID 转 TMDB 识别 -> 失败回退 Webhook 自带 TMDB ID -> 最终回退豆瓣识别；
+        - 识别源为 TMDB 时：优先豆瓣 ID 转 TMDB（附片名一致性校验与自动纠偏）
+          -> 失败回退 Webhook 自带 TMDB ID -> 最终回退豆瓣识别；
         - 识别源非 TMDB 时：优先豆瓣识别 -> 失败回退 Webhook 自带 TMDB ID。
         """
         mediachain = MediaChain()
+        douban_info: Optional[Dict[str, Any]] = None
 
         if douban_id and (not getattr(meta, "type", None) or not getattr(meta, "year", None)):
-            try:
-                douban_info = self.chain.douban_info(doubanid=douban_id) or {}
-            except Exception as error:
-                logger.warning(f"获取豆瓣条目 {douban_id} 基础信息失败：{error}")
-                douban_info = {}
-            if isinstance(douban_info, dict) and douban_info:
+            douban_info = self._fetch_douban_info(douban_id)
+            if douban_info:
                 if not getattr(meta, "type", None) and douban_info.get("type"):
                     meta.type = (
                         MediaType.MOVIE
@@ -577,7 +824,16 @@ class SaDiscoverSub(_PluginBase):
                 if converted_tmdb_id:
                     mediainfo = self._safe_recognize_media(meta=meta, tmdbid=converted_tmdb_id)
                     if mediainfo:
-                        return mediainfo, f"tmdb:{converted_tmdb_id}"
+                        return self._disambiguate_converted_media(
+                            mediachain=mediachain,
+                            meta=meta,
+                            title=title,
+                            douban_id=douban_id,
+                            tmdb_id=tmdb_id,
+                            converted_tmdb_id=converted_tmdb_id,
+                            converted_media=mediainfo,
+                            douban_info=douban_info,
+                        )
                     logger.warning(f"豆瓣 {douban_id} 转换得到 TMDB {converted_tmdb_id} 但未识别到媒体信息")
                 else:
                     logger.warning(f"未能通过豆瓣 ID {douban_id} 获取到 TMDB 信息，标题：{title}")

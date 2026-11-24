@@ -496,3 +496,101 @@ def test_get_page_cards_and_delete_history_api(monkeypatch: pytest.MonkeyPatch) 
     ok = plugin.delete_history(record_id="rec-1", apikey="secret-token")
     assert ok.success is True
     assert plugin._history == []
+
+
+def test_disambiguate_same_year_english_collision_via_webhook_tmdb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """豆瓣转 TMDB 撞车同名冷门片（如 Verity 2026）时，优先采信通过中文片名校验的 Webhook TMDB。"""
+    wrong = _StubMediaInfo(title="Verity", year="2026", mtype=MediaType.MOVIE, media_id="1812260")
+    correct = _StubMediaInfo(title="不存在的罪人", year="2026", mtype=MediaType.MOVIE, media_id="1389533")
+    chain = _StubPluginChain(
+        recognize_map={
+            (MediaSource.TMDB, "1812260"): wrong,
+            (MediaSource.TMDB, "1389533"): correct,
+        },
+        douban_data={"title": "不存在的罪人", "original_title": "Verity", "year": "2026"},
+    )
+    records = _install_runtime(monkeypatch, converted={"id": 1812260})
+    plugin = _build_plugin(chain)
+
+    plugin._handle_subscribe_request(
+        raw={},
+        item={
+            "Name": "不存在的罪人",
+            "ProductionYear": 2026,
+            "ProviderIds": {"Douban": "36900001", "Tmdb": "1389533", "DiscoverItemType": "movie"},
+        },
+    )
+
+    assert records["subscribe_add_calls"][0]["media_id"] == "1389533"
+    assert plugin._history[-1]["title"] == "不存在的罪人"
+    assert plugin._history[-1]["identity"] == "themoviedb:1389533"
+
+
+def test_disambiguate_same_year_english_collision_via_chinese_title_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Webhook 未带 TMDB 时，同名撞车应按中文片名重搜 TMDB 并纠偏到正确影片。"""
+    wrong = _StubMediaInfo(title="Verity", year="2026", mtype=MediaType.MOVIE, media_id="1812260")
+    correct = _StubMediaInfo(title="不存在的罪人", year="2026", mtype=MediaType.MOVIE, media_id="1389533")
+    chain = _StubPluginChain(
+        recognize_map={
+            (MediaSource.TMDB, "1812260"): wrong,
+            (MediaSource.TMDB, "1389533"): correct,
+        },
+        douban_data={"title": "不存在的罪人", "original_title": "Verity", "year": "2026"},
+        candidates=[
+            {
+                "type": "电影",
+                "media_source": "themoviedb",
+                "media_id": "1389533",
+                "title": "不存在的罪人",
+                "original_title": "Verity",
+                "year": "2026",
+            }
+        ],
+    )
+    records = _install_runtime(monkeypatch, converted={"id": 1812260}, exist_flag=True)
+    plugin = _build_plugin(chain)
+
+    plugin._handle_subscribe_request(
+        raw={},
+        item={
+            "Name": "不存在的罪人",
+            "ProductionYear": 2026,
+            "ProviderIds": {"Douban": "36900001", "DiscoverItemType": "movie"},
+        },
+    )
+
+    assert len(chain.search_calls) == 1
+    assert chain.search_calls[0]["meta"].title == "不存在的罪人"
+    assert records["subscribe_add_calls"] == []
+    assert plugin._history[-1]["action"] == "exist"
+    assert plugin._history[-1]["identity"] == "themoviedb:1389533"
+
+
+def test_disambiguate_keeps_converted_media_when_no_chinese_tmdb_translation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """TMDB 确实暂无中文译名时，纠偏未命中应安全保留原豆瓣转 TMDB 结果。"""
+    foreign = _StubMediaInfo(title="Obscure Film", year="2026", mtype=MediaType.MOVIE, media_id="555000")
+    chain = _StubPluginChain(
+        recognize_map={(MediaSource.TMDB, "555000"): foreign},
+        douban_data={"title": "小众外片", "original_title": "Obscure Film", "year": "2026"},
+        candidates=[],
+    )
+    records = _install_runtime(monkeypatch, converted={"id": 555000})
+    plugin = _build_plugin(chain)
+
+    plugin._handle_subscribe_request(
+        raw={},
+        item={
+            "Name": "小众外片",
+            "ProductionYear": 2026,
+            "ProviderIds": {"Douban": "36900002", "DiscoverItemType": "movie"},
+        },
+    )
+
+    assert records["subscribe_add_calls"][0]["media_id"] == "555000"
+
